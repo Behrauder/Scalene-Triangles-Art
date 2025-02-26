@@ -1,0 +1,873 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Scalene Triangles Art</title>
+  <style>
+    body {
+      font-family: sans-serif;
+      margin: 20px;
+      text-align: center;
+      background: #f9f9f9;
+    }
+    h1, h2, p {
+      margin: 10px 0;
+    }
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    .controls {
+      margin: 10px 0;
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: center;
+      gap: 12px;
+      align-items: center;
+    }
+    .controls label {
+      margin-right: 4px;
+    }
+    input[type=number],
+    input[type=text],
+    input[type=color],
+    input[type=range] {
+      padding: 4px;
+      font-size: 0.9em;
+    }
+    canvas {
+      border: 1px solid #ccc;
+      background: #fff;
+      cursor: pointer;
+    }
+    .canvases {
+      display: flex;
+      justify-content: center;
+      gap: 20px;
+      flex-wrap: wrap;
+      margin-bottom: 20px;
+    }
+    button {
+      padding: 6px 12px;
+      cursor: pointer;
+      margin: 4px;
+    }
+    section {
+      margin-bottom: 30px;
+    }
+  </style>
+  <!-- Library for Delaunator triangulation -->
+  <script src="https://unpkg.com/delaunator@5.0.0/delaunator.min.js"></script>
+</head>
+<body>
+  <div class="container">
+    <h1>Scalene Triangles Art</h1>
+    
+    <!-- Triangle Grid Generation Section -->
+    <section id="grid-generation">
+      <h2>Generate Triangle Grid</h2>
+      <div class="controls">
+        <label for="gridSize">Grid Size (n x n):</label>
+        <input type="number" id="gridSize" value="10" min="3" max="50">
+        <button id="btnGenerateGrid">Generate Grid</button>
+        <p>Click on the grid area to start painting.</p>
+      </div>
+      <canvas id="canvasGrid" width="600" height="600"></canvas>
+    </section>
+    
+    <!-- Painting Section -->
+    <section id="painting" style="display:none;">
+      <h2>Painting</h2>
+      <div class="controls">
+        <div>
+          <label for="finalHex">Final Color (C):</label>
+          <input type="text" id="finalHex" value="#943fbf" maxlength="7">
+          <label for="sliderBlueC">C Blue:</label>
+          <!-- Slider with minimum 64 -->
+          <input type="range" id="sliderBlueC" min="64" max="255" value="191">
+          <span id="blueValC">191</span>
+        </div>
+      </div>
+      <p>Select the desired Final Color (C):</p>
+      <!-- Color selector and preview -->
+      <div style="display: flex; justify-content: center; align-items: center; gap: 10px;">
+        <canvas id="canvasFinal" width="256" height="256"></canvas>
+        <canvas id="canvasPreview" width="50" height="256" style="border:1px solid #000;"></canvas>
+      </div>
+      
+      <div class="canvases">
+        <div>
+          <p>Layer B</p>
+          <canvas id="canvasB" width="600" height="600"></canvas>
+        </div>
+        <div>
+          <p>Layer A</p>
+          <canvas id="canvasA" width="600" height="600"></canvas>
+        </div>
+      </div>
+      
+      <p>Preview of the final composition (each triangle will have its random background, overlaid by B and A)</p>
+      <canvas id="canvasComposite" width="600" height="600"></canvas>
+      
+      <div class="controls">
+        <button id="btnBackToGrid">Back to Grid</button>
+        <button id="btnUndo">Ctrl Z</button>
+        <button id="btnReset">Reset</button>
+        <button id="btnDownloadA">Download Layer A</button>
+        <button id="btnDownloadB">Download Layer B</button>
+        <button id="btnDownloadBg">Download Background</button>
+        <button id="btnDownloadComposite">Download Final Composition</button>
+      </div>
+    </section>
+  </div>
+  
+  <!-- Hidden canvas for download -->
+  <canvas id="canvasDownload" style="display:none;"></canvas>
+  
+  <script>
+    /******************************************************/
+    /* Utility Functions */
+    /******************************************************/
+    function clamp(v, min, max) { return Math.min(Math.max(v, min), max); }
+    
+    function hexToRgb(h) {
+      h = h.replace('#', '');
+      if (h.length === 3) { h = h[0]+h[0]+h[1]+h[1]+h[2]+h[2]; }
+      const num = parseInt(h, 16);
+      return { r: (num >> 16) & 255, g: (num >> 8) & 255, b: num & 255 };
+    }
+    
+    function rgbToHex(r, g, b) {
+      function fix(x) { const s = x.toString(16); return s.length === 1 ? '0' + s : s; }
+      return '#' + fix(r) + fix(g) + fix(b);
+    }
+    
+    // Blend foreground (fg) over background (bg) with opacity alpha
+    function blendOver(fg, alpha, bg) {
+      const R = fg.r * alpha + bg.r * (1 - alpha);
+      const G = fg.g * alpha + bg.g * (1 - alpha);
+      const B = fg.b * alpha + bg.b * (1 - alpha);
+      return { r: Math.round(R), g: Math.round(G), b: Math.round(B) };
+    }
+    
+    function validRGB(c) {
+      return (c.r >= 0 && c.r <= 255 &&
+              c.g >= 0 && c.g <= 255 &&
+              c.b >= 0 && c.b <= 255);
+    }
+    
+    // Formula: C = 0.5A + 0.25B + 0.25(bg)  =>  B = 4C - 2A - bg
+    function computeB(A, C, bg) {
+      return {
+        r: Math.round(4 * C.r - 2 * A.r - bg.r),
+        g: Math.round(4 * C.g - 2 * A.g - bg.g),
+        b: Math.round(4 * C.b - 2 * A.b - bg.b)
+      };
+    }
+    
+    // Check if there is a valid solution for C with background W (fixed as white)
+    function hasValidSolutions(C, W) {
+      function checkChannel(Ck, Wk) {
+        const B_max = 4 * Ck - Wk;
+        const B_min = 4 * Ck - 510 - Wk;
+        return (B_min <= 255 && B_max >= 0);
+      }
+      return checkChannel(C.r, W.r) && checkChannel(C.g, W.g) && checkChannel(C.b, W.b);
+    }
+    
+    /******************************************************/
+    /* Global Variables and State */
+    /******************************************************/
+    let W = { r: 255, g: 255, b: 255 }; // Fixed background in white
+    let C = hexToRgb(document.getElementById('finalHex').value); // Final Color
+    let blueC = parseInt(document.getElementById('sliderBlueC').value, 10);
+    
+    // Each triangle will have its own background (bg) and colors A and B
+    let points = [];
+    let triangles = []; // Each object: { vertices: [{x,y}], bg, colorA, colorB }
+    
+    // Undo history
+    let undoStack = [];
+    
+    // Flags for drag control
+    let isPainting = false, isPaintingFinal = false, isRightSelecting = false;
+    let lastTriangleIndex = null;
+    
+    /******************************************************/
+    /* Generating Scalene Triangle Grid */
+    /******************************************************/
+    function isBorder(pt, tol = 1e-8) {
+      return (Math.abs(pt.x) < tol || Math.abs(pt.x - 1) < tol ||
+              Math.abs(pt.y) < tol || Math.abs(pt.y - 1) < tol);
+    }
+    
+    function distance(p1, p2) {
+      return Math.hypot(p1.x - p2.x, p1.y - p2.y);
+    }
+    
+    function isScalene(pts, tol) {
+      const d1 = distance(pts[0], pts[1]);
+      const d2 = distance(pts[1], pts[2]);
+      const d3 = distance(pts[2], pts[0]);
+      return (Math.abs(d1 - d2) >= tol &&
+              Math.abs(d1 - d3) >= tol &&
+              Math.abs(d2 - d3) >= tol);
+    }
+    
+    function generatePoints(n, noise = 0.04) {
+      let pts = [];
+      for (let i = 0; i < n; i++) {
+        for (let j = 0; j < n; j++) {
+          let x = i / (n - 1);
+          let y = j / (n - 1);
+          if (!isBorder({ x, y })) {
+            x += (Math.random() * 2 - 1) * noise;
+            y += (Math.random() * 2 - 1) * noise;
+            x = clamp(x, 0, 1);
+            y = clamp(y, 0, 1);
+          }
+          pts.push({ x, y });
+        }
+      }
+      return pts;
+    }
+    
+    function adjustPoints(pts, n, tol = 1e-2, adjustDelta = 0.01, maxIter = 100) {
+      let iter = 0;
+      while (iter < maxIter) {
+        const coords = pts.map(p => [p.x, p.y]);
+        const delaunay = Delaunator.from(coords);
+        let allScalene = true;
+        const tris = delaunay.triangles;
+        for (let i = 0; i < tris.length; i += 3) {
+          const triPts = [pts[tris[i]], pts[tris[i+1]], pts[tris[i+2]]];
+          if (!isScalene(triPts, tol)) {
+            for (let idx of [tris[i], tris[i+1], tris[i+2]]) {
+              if (!isBorder(pts[idx])) {
+                pts[idx].x = clamp(pts[idx].x + (Math.random()*2 - 1)*adjustDelta, 0, 1);
+                pts[idx].y = clamp(pts[idx].y + (Math.random()*2 - 1)*adjustDelta, 0, 1);
+                break;
+              }
+            }
+            allScalene = false;
+            break;
+          }
+        }
+        if (allScalene) break;
+        iter++;
+      }
+      return pts;
+    }
+    
+    function generateTriangulation(n) {
+      points = generatePoints(n);
+      points = adjustPoints(points, n);
+      const coords = points.map(p => [p.x, p.y]);
+      const delaunay = Delaunator.from(coords);
+      triangles = [];
+      for (let i = 0; i < delaunay.triangles.length; i += 3) {
+        const idx1 = delaunay.triangles[i];
+        const idx2 = delaunay.triangles[i+1];
+        const idx3 = delaunay.triangles[i+2];
+        triangles.push({
+          vertices: [
+            { x: points[idx1].x, y: points[idx1].y },
+            { x: points[idx2].x, y: points[idx2].y },
+            { x: points[idx3].x, y: points[idx3].y }
+          ],
+          bg: null,
+          colorA: null,
+          colorB: null
+        });
+      }
+      undoStack = [];
+    }
+    
+    /******************************************************/
+    /* Canvas Rendering and Updates */
+    /******************************************************/
+    const canvasGrid = document.getElementById('canvasGrid');
+    const ctxGrid = canvasGrid.getContext('2d');
+    const canvasFinal = document.getElementById('canvasFinal');
+    const ctxFinal = canvasFinal.getContext('2d');
+    const canvasA = document.getElementById('canvasA');
+    const ctxA = canvasA.getContext('2d');
+    const canvasB = document.getElementById('canvasB');
+    const ctxB = canvasB.getContext('2d');
+    const canvasComposite = document.getElementById('canvasComposite');
+    const ctxComposite = canvasComposite.getContext('2d');
+    const canvasWidth = canvasGrid.width;
+    const canvasHeight = canvasGrid.height;
+    
+    function clearCanvas(ctx) {
+      ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    }
+    
+    function drawGridOutlines() {
+      clearCanvas(ctxGrid);
+      ctxGrid.strokeStyle = 'black';
+      ctxGrid.lineWidth = 1;
+      triangles.forEach(tri => {
+        ctxGrid.beginPath();
+        tri.vertices.forEach((pt, i) => {
+          const x = pt.x * canvasWidth;
+          const y = pt.y * canvasHeight;
+          i === 0 ? ctxGrid.moveTo(x, y) : ctxGrid.lineTo(x, y);
+        });
+        ctxGrid.closePath();
+        ctxGrid.stroke();
+      });
+    }
+    
+    // Renders the final color selector with the indicator (white circle)
+    function renderCanvasFinal() {
+      const imgData = ctxFinal.createImageData(canvasFinal.width, canvasFinal.height);
+      const data = imgData.data;
+      for (let y = 0; y < canvasFinal.height; y++) {
+        for (let x = 0; x < canvasFinal.width; x++) {
+          const candidateC = { r: x, g: y, b: blueC };
+          const idx = (y * canvasFinal.width + x) * 4;
+          if (hasValidSolutions(candidateC, W)) {
+            const blended = blendOver(candidateC, 0.75, W);
+            data[idx]   = blended.r;
+            data[idx+1] = blended.g;
+            data[idx+2] = blended.b;
+          } else {
+            data[idx] = 190; data[idx+1] = 190; data[idx+2] = 190;
+          }
+          data[idx+3] = 255;
+        }
+      }
+      ctxFinal.putImageData(imgData, 0, 0);
+      ctxFinal.beginPath();
+      ctxFinal.arc(C.r, C.g, 5, 0, 2 * Math.PI);
+      ctxFinal.fillStyle = 'white';
+      ctxFinal.fill();
+      ctxFinal.lineWidth = 2;
+      ctxFinal.strokeStyle = 'black';
+      ctxFinal.stroke();
+    }
+    
+    // Updates the color preview on canvasPreview
+    function updatePreview() {
+      const canvasPreview = document.getElementById('canvasPreview');
+      const ctxPreview = canvasPreview.getContext('2d');
+      const previewColor = blendOver(C, 0.75, W);
+      ctxPreview.fillStyle = rgbToHex(previewColor.r, previewColor.g, previewColor.b);
+      ctxPreview.fillRect(0, 0, canvasPreview.width, canvasPreview.height);
+    }
+    
+    // Draws layers A and B (preview)
+    function drawPaintedLayers() {
+      clearCanvas(ctxA);
+      triangles.forEach(tri => {
+        ctxA.beginPath();
+        tri.vertices.forEach((pt, i) => {
+          const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+          i === 0 ? ctxA.moveTo(x, y) : ctxA.lineTo(x, y);
+        });
+        ctxA.closePath();
+        if (tri.colorA) {
+          ctxA.fillStyle = `rgba(${tri.colorA.r},${tri.colorA.g},${tri.colorA.b},0.5)`;
+          ctxA.fill();
+        }
+        ctxA.strokeStyle = 'black';
+        ctxA.lineWidth = 1;
+        ctxA.stroke();
+      });
+      clearCanvas(ctxB);
+      triangles.forEach(tri => {
+        ctxB.beginPath();
+        tri.vertices.forEach((pt, i) => {
+          const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+          i === 0 ? ctxB.moveTo(x, y) : ctxB.lineTo(x, y);
+        });
+        ctxB.closePath();
+        if (tri.colorB) {
+          ctxB.fillStyle = `rgba(${tri.colorB.r},${tri.colorB.g},${tri.colorB.b},0.5)`;
+          ctxB.fill();
+        }
+        ctxB.strokeStyle = 'black';
+        ctxB.lineWidth = 1;
+        ctxB.stroke();
+      });
+    }
+    
+    // Draws the final composition: background, layer B, layer A, and outlines.
+    function drawComposite() {
+      clearCanvas(ctxComposite);
+      triangles.forEach(tri => {
+        ctxComposite.beginPath();
+        tri.vertices.forEach((pt, i) => {
+          const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+          i === 0 ? ctxComposite.moveTo(x, y) : ctxComposite.lineTo(x, y);
+        });
+        ctxComposite.closePath();
+        ctxComposite.fillStyle = tri.bg ? rgbToHex(tri.bg.r, tri.bg.g, tri.bg.b) : rgbToHex(W.r, W.g, W.b);
+        ctxComposite.fill();
+      });
+      triangles.forEach(tri => {
+        if (tri.colorB) {
+          ctxComposite.beginPath();
+          tri.vertices.forEach((pt, i) => {
+            const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+            i === 0 ? ctxComposite.moveTo(x, y) : ctxComposite.lineTo(x, y);
+          });
+          ctxComposite.closePath();
+          ctxComposite.fillStyle = `rgba(${tri.colorB.r},${tri.colorB.g},${tri.colorB.b},0.5)`;
+          ctxComposite.fill();
+        }
+      });
+      triangles.forEach(tri => {
+        if (tri.colorA) {
+          ctxComposite.beginPath();
+          tri.vertices.forEach((pt, i) => {
+            const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+            i === 0 ? ctxComposite.moveTo(x, y) : ctxComposite.lineTo(x, y);
+          });
+          ctxComposite.closePath();
+          ctxComposite.fillStyle = `rgba(${tri.colorA.r},${tri.colorA.g},${tri.colorA.b},0.5)`;
+          ctxComposite.fill();
+        }
+      });
+      ctxComposite.strokeStyle = 'black';
+      ctxComposite.lineWidth = 1;
+      triangles.forEach(tri => {
+        ctxComposite.beginPath();
+        tri.vertices.forEach((pt, i) => {
+          const x = pt.x * canvasWidth, y = pt.y * canvasHeight;
+          i === 0 ? ctxComposite.moveTo(x, y) : ctxComposite.lineTo(x, y);
+        });
+        ctxComposite.closePath();
+        ctxComposite.stroke();
+      });
+    }
+    
+    /******************************************************/
+    /* Painting and Mouse Selection Functions */
+    /******************************************************/
+    // For canvases composite, A and B – paint action (left button)
+    function canvasPaintHandler(evt) {
+      if (evt.button === 2) return;
+      const pos = getClickPos(evt, evt.target);
+      for (let i = 0; i < triangles.length; i++) {
+        if (pointInTriangle(pos.x, pos.y, triangles[i])) {
+          if (lastTriangleIndex !== i) {
+            undoStack.push({ index: i, previous: { bg: triangles[i].bg, colorA: triangles[i].colorA, colorB: triangles[i].colorB } });
+            paintTriangle(triangles[i]);
+            drawPaintedLayers();
+            drawComposite();
+            lastTriangleIndex = i;
+          }
+          break;
+        }
+      }
+    }
+    
+    // For canvasFinal (color selector)
+    function canvasFinalSelectHandler(evt) {
+      const pos = getClickPos(evt, canvasFinal);
+      const candidateC = { r: clamp(Math.floor(pos.x), 0, canvasFinal.width - 1), g: clamp(Math.floor(pos.y), 0, canvasFinal.height - 1), b: blueC };
+      if (!hasValidSolutions(candidateC, W)) return;
+      C = candidateC;
+      finalHexInput.value = rgbToHex(C.r, C.g, C.b);
+      drawComposite();
+      renderCanvasFinal();
+      updatePreview();
+    }
+    
+    // Right-click selection
+    function rightClickHandler(evt, canvas) {
+      evt.preventDefault();
+      const pos = getClickPos(evt, canvas);
+      if (canvas === canvasFinal) {
+        const candidateC = { r: clamp(Math.floor(pos.x), 0, canvasFinal.width - 1), g: clamp(Math.floor(pos.y), 0, canvasFinal.height - 1), b: blueC };
+        C = candidateC;
+        finalHexInput.value = rgbToHex(C.r, C.g, C.b);
+        renderCanvasFinal();
+        updatePreview();
+      } else {
+        const pixel = ctxComposite.getImageData(clamp(Math.floor(pos.x), 0, canvasWidth - 1), clamp(Math.floor(pos.y), 0, canvasHeight - 1), 1, 1).data;
+        C = { r: pixel[0], g: pixel[1], b: pixel[2] };
+        blueC = C.b;
+        sliderBlueC.value = blueC;
+        document.getElementById('blueValC').textContent = blueC;
+        finalHexInput.value = rgbToHex(C.r, C.g, C.b);
+        renderCanvasFinal();
+        updatePreview();
+      }
+    }
+    
+    // Calculates the position relative to the canvas
+    function getClickPos(evt, canvas) {
+      const rect = canvas.getBoundingClientRect();
+      return { x: evt.clientX - rect.left, y: evt.clientY - rect.top };
+    }
+    
+    // Checks if a point (x,y) is inside a triangle
+    function pointInTriangle(x, y, tri) {
+      const pts = tri.vertices.map(pt => ({ x: pt.x * canvasWidth, y: pt.y * canvasHeight }));
+      const area = (p0, p1, p2) => Math.abs((p0.x*(p1.y-p2.y) + p1.x*(p2.y-p0.y) + p2.x*(p0.y-p1.y)) / 2);
+      const A = area(pts[0], pts[1], pts[2]);
+      const A1 = area({ x, y }, pts[1], pts[2]);
+      const A2 = area(pts[0], { x, y }, pts[2]);
+      const A3 = area(pts[0], pts[1], { x, y });
+      return Math.abs(A - (A1 + A2 + A3)) < 0.5;
+    }
+    
+    // When painting a triangle, generates a random background and sets colors A and B
+    function paintTriangle(tri) {
+      function randomBgChannel(Ck) {
+        const lower = Math.max(0, 4 * Ck - 765);
+        const upper = Math.min(255, 4 * Ck);
+        return Math.floor(Math.random() * (upper - lower + 1)) + lower;
+      }
+      const bg = { r: randomBgChannel(C.r), g: randomBgChannel(C.g), b: randomBgChannel(C.b) };
+      tri.bg = bg;
+      function getBounds(channel) {
+        let L = Math.ceil((4 * C[channel] - bg[channel] - 255) / 2);
+        let U = Math.floor((4 * C[channel] - bg[channel]) / 2);
+        L = Math.max(0, L);
+        U = Math.min(255, U);
+        return { L, U };
+      }
+      const boundsR = getBounds('r');
+      const boundsG = getBounds('g');
+      const boundsB = getBounds('b');
+      if (boundsR.L > boundsR.U || boundsG.L > boundsG.U || boundsB.L > boundsB.U) {
+        alert('Could not find a valid range for color A.');
+        return;
+      }
+      const newA = {
+        r: Math.floor(Math.random() * (boundsR.U - boundsR.L + 1)) + boundsR.L,
+        g: Math.floor(Math.random() * (boundsG.U - boundsG.L + 1)) + boundsG.L,
+        b: Math.floor(Math.random() * (boundsB.U - boundsB.L + 1)) + boundsB.L
+      };
+      const newB = computeB(newA, C, bg);
+      tri.colorA = newA;
+      tri.colorB = newB;
+    }
+    
+    /******************************************************/
+    /* Events and Interaction */
+    /******************************************************/
+    document.getElementById('btnGenerateGrid').addEventListener('click', () => {
+      const n = parseInt(document.getElementById('gridSize').value);
+      generateTriangulation(n);
+      drawGridOutlines();
+      document.getElementById('grid-generation').style.display = 'block';
+      document.getElementById('painting').style.display = 'none';
+    });
+    
+    canvasGrid.addEventListener('click', () => {
+      document.getElementById('grid-generation').style.display = 'none';
+      document.getElementById('painting').style.display = 'block';
+      renderCanvasFinal();
+      drawPaintedLayers();
+      drawComposite();
+      updatePreview();
+    });
+    
+    // Update controls for C
+    const finalHexInput = document.getElementById('finalHex');
+    const sliderBlueC = document.getElementById('sliderBlueC');
+    sliderBlueC.addEventListener('input', () => {
+      blueC = parseInt(sliderBlueC.value, 10);
+      if (blueC < 64) {
+        blueC = 64;
+        sliderBlueC.value = "64";
+      }
+      document.getElementById('blueValC').textContent = blueC;
+      C.b = blueC;
+      finalHexInput.value = rgbToHex(C.r, C.g, C.b);
+      renderCanvasFinal();
+      updatePreview();
+    });
+    finalHexInput.addEventListener('change', () => {
+      let h = finalHexInput.value;
+      if (!h.startsWith('#')) h = '#' + h;
+      finalHexInput.value = h;
+      C = hexToRgb(h);
+      renderCanvasFinal();
+      drawComposite();
+      updatePreview();
+    });
+    
+    // Events for canvases composite, A and B
+    [canvasComposite, canvasA, canvasB].forEach(canvas => {
+      canvas.addEventListener('mousedown', (ev) => {
+        if (ev.button === 2) {
+          isRightSelecting = true;
+          rightClickHandler(ev, canvas);
+        } else if (ev.button === 0) {
+          isPainting = true;
+          lastTriangleIndex = null;
+          canvasPaintHandler(ev);
+        }
+      });
+      canvas.addEventListener('mousemove', (ev) => {
+        if (isRightSelecting && (ev.buttons & 2)) {
+          rightClickHandler(ev, canvas);
+        } else if (isPainting) {
+          canvasPaintHandler(ev);
+        }
+      });
+      canvas.addEventListener('contextmenu', (ev) => {
+        ev.preventDefault();
+        rightClickHandler(ev, canvas);
+      });
+    });
+    
+    // Events for canvasFinal (color selector)
+    canvasFinal.addEventListener('mousedown', (ev) => {
+      if (ev.button === 2) {
+        isRightSelecting = true;
+        rightClickHandler(ev, canvasFinal);
+      } else if (ev.button === 0) {
+        isPaintingFinal = true;
+        canvasFinalSelectHandler(ev);
+      }
+    });
+    canvasFinal.addEventListener('mousemove', (ev) => {
+      if (isRightSelecting && (ev.buttons & 2)) {
+        rightClickHandler(ev, canvasFinal);
+      } else if (isPaintingFinal) {
+        canvasFinalSelectHandler(ev);
+      }
+    });
+    canvasFinal.addEventListener('contextmenu', (ev) => {
+      ev.preventDefault();
+      rightClickHandler(ev, canvasFinal);
+    });
+    
+    document.addEventListener('mouseup', () => {
+      isPainting = false;
+      isPaintingFinal = false;
+      isRightSelecting = false;
+      lastTriangleIndex = null;
+    });
+    
+    /******************************************************/
+    /* Undo, Reset, and Back to Grid Buttons */
+    /******************************************************/
+    document.getElementById('btnUndo').addEventListener('click', () => {
+      if (undoStack.length === 0) return;
+      const last = undoStack.pop();
+      if (last.all) {
+        triangles = last.previous;
+      } else {
+        triangles[last.index].bg = last.previous.bg;
+        triangles[last.index].colorA = last.previous.colorA;
+        triangles[last.index].colorB = last.previous.colorB;
+      }
+      drawPaintedLayers();
+      drawComposite();
+    });
+    
+    document.getElementById('btnReset').addEventListener('click', () => {
+      undoStack.push({ all: true, previous: JSON.parse(JSON.stringify(triangles)) });
+      triangles.forEach(tri => {
+        tri.bg = null;
+        tri.colorA = null;
+        tri.colorB = null;
+      });
+      drawPaintedLayers();
+      drawComposite();
+    });
+    
+    document.getElementById('btnBackToGrid').addEventListener('click', () => {
+      document.getElementById('grid-generation').style.display = 'block';
+      document.getElementById('painting').style.display = 'none';
+      drawGridOutlines();
+    });
+    
+    // Keyboard listener for Ctrl+Z
+    document.addEventListener('keydown', (evt) => {
+      if ((evt.ctrlKey || evt.metaKey) && evt.key === 'z') {
+        evt.preventDefault();
+        if (undoStack.length === 0) return;
+        const last = undoStack.pop();
+        if (last.all) {
+          triangles = last.previous;
+        } else {
+          triangles[last.index].bg = last.previous.bg;
+          triangles[last.index].colorA = last.previous.colorA;
+          triangles[last.index].colorB = last.previous.colorB;
+        }
+        drawPaintedLayers();
+        drawComposite();
+      }
+    });
+    
+    /******************************************************/
+    /* Download Images with Padding */
+    /******************************************************/
+    function downloadImage(layer) {
+      let downloadCanvas = document.createElement('canvas');
+      let downloadCtx = downloadCanvas.getContext('2d');
+      
+      if (layer === 'bg') {
+        // Background: height = canvasHeight + 52, with 52 transparent pixels at the top
+        downloadCanvas.width = canvasWidth;
+        downloadCanvas.height = canvasHeight + 52;
+        triangles.forEach(tri => {
+          downloadCtx.beginPath();
+          tri.vertices.forEach((pt, i) => {
+            let x = pt.x * canvasWidth;
+            let y = pt.y * canvasHeight + 52;
+            i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+          });
+          downloadCtx.closePath();
+          downloadCtx.fillStyle = tri.bg ? rgbToHex(tri.bg.r, tri.bg.g, tri.bg.b) : rgbToHex(W.r, W.g, W.b);
+          downloadCtx.fill();
+        });
+        downloadCtx.strokeStyle = 'black';
+        downloadCtx.lineWidth = 1;
+        triangles.forEach(tri => {
+          downloadCtx.beginPath();
+          tri.vertices.forEach((pt, i) => {
+            let x = pt.x * canvasWidth;
+            let y = pt.y * canvasHeight + 52;
+            i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+          });
+          downloadCtx.closePath();
+          downloadCtx.stroke();
+        });
+      } else if (layer === 'A') {
+        // Layer A: width = canvasWidth + 40, height = canvasHeight + 10;
+        // Offset: 40 pixels to the right and 10 pixels down
+        downloadCanvas.width = canvasWidth + 40;
+        downloadCanvas.height = canvasHeight + 10;
+        triangles.forEach(tri => {
+          if (tri.colorA) {
+            downloadCtx.beginPath();
+            tri.vertices.forEach((pt, i) => {
+              let x = pt.x * canvasWidth + 40;
+              let y = pt.y * canvasHeight + 10;
+              i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+            });
+            downloadCtx.closePath();
+            downloadCtx.fillStyle = `rgba(${tri.colorA.r},${tri.colorA.g},${tri.colorA.b},0.5)`;
+            downloadCtx.fill();
+          }
+        });
+        downloadCtx.strokeStyle = 'black';
+        downloadCtx.lineWidth = 1;
+        triangles.forEach(tri => {
+          if (tri.colorA) {
+            downloadCtx.beginPath();
+            tri.vertices.forEach((pt, i) => {
+              let x = pt.x * canvasWidth + 40;
+              let y = pt.y * canvasHeight + 10;
+              i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+            });
+            downloadCtx.closePath();
+            downloadCtx.stroke();
+          }
+        });
+      } else {
+        // For composite, B, etc., keep original dimensions
+        downloadCanvas.width = canvasWidth;
+        downloadCanvas.height = canvasHeight;
+        if (layer === 'composite') {
+          triangles.forEach(tri => {
+            downloadCtx.beginPath();
+            tri.vertices.forEach((pt, i) => {
+              let x = pt.x * canvasWidth;
+              let y = pt.y * canvasHeight;
+              i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+            });
+            downloadCtx.closePath();
+            downloadCtx.fillStyle = tri.bg ? rgbToHex(tri.bg.r, tri.bg.g, tri.bg.b) : rgbToHex(W.r, W.g, W.b);
+            downloadCtx.fill();
+          });
+          triangles.forEach(tri => {
+            if (tri.colorB) {
+              downloadCtx.beginPath();
+              tri.vertices.forEach((pt, i) => {
+                let x = pt.x * canvasWidth;
+                let y = pt.y * canvasHeight;
+                i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+              });
+              downloadCtx.closePath();
+              downloadCtx.fillStyle = `rgba(${tri.colorB.r},${tri.colorB.g},${tri.colorB.b},0.5)`;
+              downloadCtx.fill();
+            }
+          });
+          triangles.forEach(tri => {
+            if (tri.colorA) {
+              downloadCtx.beginPath();
+              tri.vertices.forEach((pt, i) => {
+                let x = pt.x * canvasWidth;
+                let y = pt.y * canvasHeight;
+                i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+              });
+              downloadCtx.closePath();
+              downloadCtx.fillStyle = `rgba(${tri.colorA.r},${tri.colorA.g},${tri.colorA.b},0.5)`;
+              downloadCtx.fill();
+            }
+          });
+          downloadCtx.strokeStyle = 'black';
+          downloadCtx.lineWidth = 1;
+          triangles.forEach(tri => {
+            downloadCtx.beginPath();
+            tri.vertices.forEach((pt, i) => {
+              let x = pt.x * canvasWidth;
+              let y = pt.y * canvasHeight;
+              i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+            });
+            downloadCtx.closePath();
+            downloadCtx.stroke();
+          });
+        } else if (layer === 'B') {
+          triangles.forEach(tri => {
+            if (tri.colorB) {
+              downloadCtx.beginPath();
+              tri.vertices.forEach((pt, i) => {
+                let x = pt.x * canvasWidth;
+                let y = pt.y * canvasHeight;
+                i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+              });
+              downloadCtx.closePath();
+              downloadCtx.fillStyle = `rgba(${tri.colorB.r},${tri.colorB.g},${tri.colorB.b},0.5)`;
+              downloadCtx.fill();
+            }
+          });
+          downloadCtx.strokeStyle = 'black';
+          downloadCtx.lineWidth = 1;
+          triangles.forEach(tri => {
+            if (tri.colorB) {
+              downloadCtx.beginPath();
+              tri.vertices.forEach((pt, i) => {
+                let x = pt.x * canvasWidth;
+                let y = pt.y * canvasHeight;
+                i === 0 ? downloadCtx.moveTo(x, y) : downloadCtx.lineTo(x, y);
+              });
+              downloadCtx.closePath();
+              downloadCtx.stroke();
+            }
+          });
+        }
+      }
+      const link = document.createElement('a');
+      if (layer === 'composite') {
+        link.download = 'final_composition.png';
+      } else if (layer === 'bg') {
+        link.download = 'background.png';
+      } else if (layer === 'A') {
+        link.download = 'layerA.png';
+      } else if (layer === 'B') {
+        link.download = 'layerB.png';
+      }
+      link.href = downloadCanvas.toDataURL('image/png');
+      link.click();
+    }
+    
+    document.getElementById('btnDownloadA').addEventListener('click', () => downloadImage('A'));
+    document.getElementById('btnDownloadB').addEventListener('click', () => downloadImage('B'));
+    document.getElementById('btnDownloadBg').addEventListener('click', () => downloadImage('bg'));
+    document.getElementById('btnDownloadComposite').addEventListener('click', () => downloadImage('composite'));
+    
+  </script>
+</body>
+</html>
